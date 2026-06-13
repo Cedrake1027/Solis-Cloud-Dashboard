@@ -1,0 +1,90 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "solis-dashboard",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "id": "dash2-0001-0001-0001-000000000001",
+      "name": "Webhook",
+      "webhookId": "solis-dashboard"
+    },
+    {
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\n\n// ─── CONFIG — fill in your values ────────────────────────────────────────────\nconst KEY_ID     = 'YOUR_SOLIS_KEY_ID';      // soliscloud.com → Account → API Management\nconst KEY_SECRET = 'YOUR_SOLIS_KEY_SECRET';  // same page as KEY_ID\n// Add or remove inverter entries to match your installation\nconst INVERTERS = [\n  { id: 'YOUR_INVERTER_1_ID', sn: 'YOUR_INVERTER_1_SN' },  // Inverter 1\n  { id: 'YOUR_INVERTER_2_ID', sn: 'YOUR_INVERTER_2_SN' },  // Inverter 2\n];\n// ─────────────────────────────────────────────────────────────────────────────\n\nconst now = new Date();\nconst D = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];\nconst M = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];\nconst gmtStr = `${D[now.getUTCDay()]}, ${String(now.getUTCDate()).padStart(2,'0')} ${M[now.getUTCMonth()]} ${now.getUTCFullYear()} ${String(now.getUTCHours()).padStart(2,'0')}:${String(now.getUTCMinutes()).padStart(2,'0')}:${String(now.getUTCSeconds()).padStart(2,'0')} GMT`;\n\nconst utc8    = new Date(now.getTime() + 8 * 3600000);\nconst dateYMD = utc8.toISOString().slice(0, 10);\n\nfunction signRequest(apiPath, bodyObj) {\n  const body    = JSON.stringify(bodyObj);\n  const md5     = crypto.createHash('md5').update(body, 'utf8').digest('base64');\n  const signStr = 'POST\\n' + md5 + '\\napplication/json\\n' + gmtStr + '\\n' + apiPath;\n  const sig     = crypto.createHmac('sha1', KEY_SECRET).update(signStr).digest('base64');\n  return { authHeader: 'API ' + KEY_ID + ':' + sig, contentMD5: md5, dateHeader: gmtStr };\n}\n\nconst listBody = { pageNo: 1, pageSize: 20 };\nconst requests = [\n  {\n    itemType:    'list',\n    apiUrl:      'https://www.soliscloud.com:13333/v1/api/inverterList',\n    requestBody: listBody,\n    ...signRequest('/v1/api/inverterList', listBody),\n  },\n  ...INVERTERS.map(inv => {\n    const body = { id: inv.id, sn: inv.sn, time: dateYMD, timeZone: 8 };\n    return {\n      itemType:    'day',\n      apiUrl:      'https://www.soliscloud.com:13333/v1/api/inverterDay',\n      requestBody: body,\n      ...signRequest('/v1/api/inverterDay', body),\n    };\n  }),\n];\n\nreturn requests.map(r => ({ json: r }));\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [240, 0],
+      "id": "dash2-0001-0001-0001-000000000002",
+      "name": "Build Auth"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.apiUrl }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "={{ $json.authHeader }}" },
+            { "name": "Content-MD5",   "value": "={{ $json.contentMD5 }}" },
+            { "name": "Date",          "value": "={{ $json.dateHeader }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.requestBody }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [480, 0],
+      "id": "dash2-0001-0001-0001-000000000003",
+      "name": "Fetch All"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─── CONFIG — fill in your values ────────────────────────────────────────────\nconst RESERVE_SOC = 20;  // % SoC considered empty for time-to-empty calculation\n// Battery capacity in kWh keyed by inverter ID.\n// Find your inverter IDs in SolisCloud → Plant → Inverter details.\n// Dyness LV module = 5.12 kWh each. Multiply by number of parallel modules.\nconst CAPACITY_KWH = {\n  'YOUR_INVERTER_1_ID': 10.24,  // Inverter 1 — e.g. Dyness LV × 2 modules\n  'YOUR_INVERTER_2_ID': 15.36,  // Inverter 2 — e.g. Dyness LV × 3 modules\n};\n// Order MUST match the INVERTERS array in Build Auth node\nconst INVERTER_ORDER = [\n  'YOUR_INVERTER_1_ID',  // Inverter 1\n  'YOUR_INVERTER_2_ID',  // Inverter 2\n];\n// ─────────────────────────────────────────────────────────────────────────────\n\nconst items    = $input.all();\nconst listData = items[0].json;\nconst dayItems = items.slice(1);\n\n// Sparkline data keyed by inverter ID\nconst sparkData = {};\ndayItems.forEach((item, i) => {\n  const id  = INVERTER_ORDER[i];\n  if (!id) return;\n  const raw = item.json;\n  const arr = raw.data?.records ?? raw.data?.inverterDayList ?? raw.data ?? [];\n  sparkData[id] = Array.isArray(arr)\n    ? arr.map(r => r.batteryCapacitySoc ?? null).filter(v => v !== null)\n    : [];\n});\n\n// UTC+8 timestamp\nconst now  = new Date();\nconst utc8 = new Date(now.getTime() + 8 * 3600000);\nconst MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];\nconst _h    = utc8.getUTCHours();\nconst _ampm = _h >= 12 ? 'PM' : 'AM';\nconst _h12  = String(_h % 12 || 12).padStart(2, '0');\nconst _min  = String(utc8.getUTCMinutes()).padStart(2, '0');\nconst timeStr = `${MONTHS[utc8.getUTCMonth()]} ${utc8.getUTCDate()}, ${utc8.getUTCFullYear()} at ${_h12}:${_min} ${_ampm}`;\n\nfunction batteryEstimates(soc, dischargeKw, capacityKwh) {\n  const usableKwh = ((soc - RESERVE_SOC) / 100) * capacityKwh;\n  if (usableKwh <= 0) return { tte: 'At reserve', eta: null };\n  const hours = usableKwh / dischargeKw;\n  const h = Math.floor(hours), m = Math.round((hours - h) * 60);\n  const tte = h === 0 ? `≈ ${m}m to ${RESERVE_SOC}%` : `≈ ${h}h ${m}m to ${RESERVE_SOC}%`;\n  const etaUtc8 = new Date(now.getTime() + hours * 3600000 + 8 * 3600000);\n  const eH    = etaUtc8.getUTCHours();\n  const eH12  = String(eH % 12 || 12).padStart(2, '0');\n  const eMin  = String(etaUtc8.getUTCMinutes()).padStart(2, '0');\n  const eAmpm = eH >= 12 ? 'PM' : 'AM';\n  const tomorrow = etaUtc8.getUTCDate() !== utc8.getUTCDate();\n  return { tte, eta: (tomorrow ? 'Tomorrow ' : '') + eH12 + ':' + eMin + ' ' + eAmpm };\n}\n\nfunction chargeEstimates(soc, chargeKw, capacityKwh) {\n  const remainingKwh = ((100 - soc) / 100) * capacityKwh;\n  if (remainingKwh <= 0) return { ttf: 'Fully charged', etf: null };\n  const hours = remainingKwh / chargeKw;\n  const h = Math.floor(hours), m = Math.round((hours - h) * 60);\n  const ttf = h === 0 ? `≈ ${m}m to full` : `≈ ${h}h ${m}m to full`;\n  const etfUtc8 = new Date(now.getTime() + hours * 3600000 + 8 * 3600000);\n  const eH    = etfUtc8.getUTCHours();\n  const eH12  = String(eH % 12 || 12).padStart(2, '0');\n  const eMin  = String(etfUtc8.getUTCMinutes()).padStart(2, '0');\n  const eAmpm = eH >= 12 ? 'PM' : 'AM';\n  const tomorrow = etfUtc8.getUTCDate() !== utc8.getUTCDate();\n  return { ttf, etf: (tomorrow ? 'Tomorrow ' : '') + eH12 + ':' + eMin + ' ' + eAmpm };\n}\n\nconst records   = listData.data?.page?.records || [];\nconst inverters = records.map(inv => {\n  const id        = inv.id || inv.inverterId || '';\n  const soc       = inv.batteryCapacitySoc ?? 0;\n  const battPower = inv.batteryPower ?? 0;\n  const pac       = inv.pac  ?? 0;\n  const psum      = inv.psum ?? 0;\n  const load      = Math.max(0, pac - battPower - psum);\n  const discharge = battPower < 0 ? Math.abs(battPower) : 0;\n  const powerMode = battPower < 0 ? 'discharging' : battPower > 0 ? 'charging' : 'idle';\n  const powerKw   = Math.abs(battPower).toFixed(2);\n  const status    = { 1: 'online', 2: 'offline', 3: 'alarm' }[inv.state] || 'offline';\n  const capacityKwh = CAPACITY_KWH[id] || 10.24;\n  let tte = null, eta = null, ttf = null, etf = null;\n  if (powerMode === 'discharging' && discharge > 0) {\n    ({ tte, eta } = batteryEstimates(soc, discharge, capacityKwh));\n  } else if (powerMode === 'charging' && battPower > 0) {\n    ({ ttf, etf } = chargeEstimates(soc, battPower, capacityKwh));\n  }\n  return {\n    id, name: inv.stationName || 'Inverter',\n    status, soc, powerMode, powerKw,\n    solar: pac.toFixed(2),\n    load:  load.toFixed(2),\n    timeToEmpty: tte, eta, timeToFull: ttf, etf, capacityKwh,\n  };\n});\n\n// ─── HTML TEMPLATE ───────────────────────────────────────────────────────────\n\nfunction sparkSvg(data) {\n  if (!data || data.length < 2) return '';\n  const W = 300, H = 72, pT = 8, pB = 8;\n  const ph = H - pT - pB;\n  const yv = v => (pT + ph - (Math.min(100, Math.max(0, v)) / 100) * ph).toFixed(1);\n  const n   = data.length;\n  const pts = data.map((v, i) => (((i / (n - 1)) * W).toFixed(1) + ',' + yv(v))).join(' ');\n  const fill = `0,${pT + ph} ${pts} ${W},${pT + ph}`;\n  const refs = [[80,'#334155','4,3',1],[50,'#1e2d3d','2,4',1],[20,'#ef4444','3,2',0.35]].map(([pct,col,dash,op]) => {\n    const y = yv(pct);\n    return `<line x1='0' y1='${y}' x2='${W}' y2='${y}' stroke='${col}' stroke-opacity='${op}' stroke-width='1' stroke-dasharray='${dash}'/><text x='3' y='${+y - 2}' fill='#4b5563' font-size='8'>${pct}</text>`;\n  }).join('');\n  const last = data[n - 1];\n  const lx   = W;\n  const ly   = yv(last);\n  const dc   = last > 50 ? '#22c55e' : last > 20 ? '#f59e0b' : '#ef4444';\n  const ty   = +ly < pT + 14 ? +ly + 13 : +ly - 5;\n  return `<div class='spark'><svg viewBox='0 0 ${W} ${H}' preserveAspectRatio='none' style='width:100%;height:${H}px;display:block'>${refs}<polygon points='${fill}' fill='#22c55e' fill-opacity='0.10'/><polyline points='${pts}' fill='none' stroke='#22c55e' stroke-width='1.5' stroke-linejoin='round' stroke-linecap='round'/><circle cx='${lx}' cy='${ly}' r='3' fill='${dc}' stroke='#0f172a' stroke-width='1.5'/><text x='${lx - 6}' y='${ty}' text-anchor='end' fill='${dc}' font-size='9' font-weight='700'>${last}%</text></svg><div class='spark-label'>SoC · Last 24h</div></div>`;\n}\n\nfunction socColor(soc) {\n  return soc > 50 ? '#22c55e' : soc > 20 ? '#f59e0b' : '#ef4444';\n}\n\nfunction chip(mode, kw) {\n  const map = {\n    charging:    ['⬆', 'Charging',    'chip-charging'],\n    discharging: ['⬇', 'Discharging', 'chip-discharging'],\n    idle:        ['⏸', 'Idle',        'chip-idle'],\n  };\n  const [icon, label, cls] = map[mode] || map.idle;\n  const kwStr = +kw > 0 ? ' ' + kw + ' kW' : '';\n  return `<span class='chip ${cls}'>${icon} ${label}${kwStr}</span>`;\n}\n\nfunction badge(status) {\n  const map = {\n    online:  ['Online',  'badge-online'],\n    offline: ['Offline', 'badge-offline'],\n    alarm:   ['Alarm',   'badge-alarm'],\n  };\n  const [label, cls] = map[status] || map.offline;\n  return `<span class='badge ${cls}'>${label}</span>`;\n}\n\nconst cards = inverters.map(inv => {\n  const color  = socColor(inv.soc);\n  const tteRow = inv.timeToEmpty\n    ? `<div class='tte'><div class='tte-primary'>🕐 ${inv.timeToEmpty}</div><div class='tte-secondary'>${inv.eta ? '~' + inv.eta + ' ' : ''}<span class='cap'>· ${inv.capacityKwh} kWh</span></div></div>`\n    : inv.timeToFull\n    ? `<div class='tte'><div class='tte-primary'>⚡ ${inv.timeToFull}</div><div class='tte-secondary'>${inv.etf ? '~' + inv.etf + ' ' : ''}<span class='cap'>· ${inv.capacityKwh} kWh</span></div></div>`\n    : '';\n  const spark = sparkSvg(sparkData[inv.id] || []);\n  return `<div class='card${inv.status === 'alarm' ? ' card-alarm' : ''}'>\n  <div class='card-header'><span class='station'>${inv.name}</span>${badge(inv.status)}</div>\n  <div class='soc-row'><span class='soc-num' style='color:${color}'>${inv.soc}%</span>${chip(inv.powerMode, inv.powerKw)}</div>\n  ${tteRow}\n  <div class='bar-track'><div class='bar-fill' style='width:${inv.soc}%;background:${color}'></div></div>\n  <div class='stats'>\n    <div class='stat'><span class='stat-label'>Solar</span><span class='stat-val'>${inv.solar} kW</span></div>\n    <div class='stat'><span class='stat-label'>Load</span><span class='stat-val'>${inv.load} kW</span></div>\n  </div>\n  ${spark}\n</div>`;\n}).join('\\n');\n\nconst css = `*{box-sizing:border-box;margin:0;padding:0}body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh;padding:24px}.topbar{margin-bottom:10px}h1{font-size:1.4rem;font-weight:700;color:#f8fafc;margin-bottom:8px}.status-bar{background:#1e293b;border:1px solid #334155;border-radius:10px;padding:10px 14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:20px}.status-time{font-size:1rem;font-weight:700;color:#f1f5f9}.status-right{display:flex;align-items:center;gap:10px}.status-countdown{font-size:.8rem;color:#64748b}.status-countdown span{color:#22c55e;font-weight:700}.btn{font-size:.8rem;font-weight:600;color:#3b82f6;background:none;border:1px solid #1d4ed8;cursor:pointer;padding:5px 11px;border-radius:7px}.btn:hover{background:#1e3a5f}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px}.card{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:20px}.card-alarm{border-color:#7f1d1d;background:#1a1a2e}.card-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}.station{font-weight:700;font-size:1rem;color:#f1f5f9}.badge{font-size:.7rem;font-weight:700;padding:3px 10px;border-radius:999px;text-transform:uppercase;letter-spacing:.06em}.badge-online{background:#14532d;color:#4ade80}.badge-offline{background:#1c1917;color:#78716c}.badge-alarm{background:#7f1d1d;color:#fca5a5}.soc-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}.soc-num{font-size:2.6rem;font-weight:800;line-height:1}.chip{font-size:.78rem;font-weight:600;padding:4px 10px;border-radius:8px}.chip-charging{background:#052e16;color:#4ade80}.chip-discharging{background:#1e293b;color:#94a3b8;border:1px solid #475569}.chip-idle{background:#1e293b;color:#64748b;border:1px solid #334155}.tte{margin-bottom:12px}.tte-primary{font-size:.92rem;font-weight:700;color:#e2e8f0;margin-bottom:3px}.tte-secondary{font-size:.82rem;color:#94a3b8}.bar-track{height:10px;background:#334155;border-radius:999px;overflow:hidden;margin-bottom:14px}.bar-fill{height:100%;border-radius:999px}.stats{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-bottom:12px}.stat{background:#0f172a;border-radius:8px;padding:8px;text-align:center}.stat-label{display:block;font-size:.65rem;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin-bottom:2px}.stat-val{font-size:.85rem;font-weight:600;color:#cbd5e1}.spark{margin-top:10px;border-top:1px solid #334155;padding-top:8px}.spark-label{font-size:.65rem;color:#475569;margin-top:2px;text-transform:uppercase;letter-spacing:.05em}.cap{font-size:.78rem;color:#64748b}`;\n\nconst html = `<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Solis Dashboard</title><style>${css}</style></head><body><div class='topbar'><h1>&#9728;&#65039; Solis Solar Dashboard</h1></div><div class='status-bar'><span class='status-time'>As of ${timeStr}</span><div class='status-right'><span class='status-countdown'>Auto-refresh in <span id='cd'>5:00</span></span><button class='btn' onclick='hardRefresh()'>&#8635; Refresh</button></div></div><div class='grid'>${cards}</div><script>function hardRefresh(){var base=location.pathname;window.location.replace(base+'?t='+Date.now());}let t=300;const el=document.getElementById('cd');setInterval(()=>{t--;if(t<=0){hardRefresh();return;}const m=Math.floor(t/60),s=t%60;el.textContent=m+':'+(s<10?'0':'')+s;},1000);<\\/script></body></html>`;\n\nreturn [{ json: { html } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [720, 0],
+      "id": "dash2-0001-0001-0001-000000000004",
+      "name": "Process + Render"
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.html }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              { "name": "Content-Type", "value": "text/html; charset=utf-8" },
+              { "name": "Cache-Control", "value": "no-store, no-cache, must-revalidate" },
+              { "name": "Pragma", "value": "no-cache" }
+            ]
+          }
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [960, 0],
+      "id": "dash2-0001-0001-0001-000000000005",
+      "name": "Return Dashboard"
+    }
+  ],
+  "connections": {
+    "Webhook":          { "main": [[{ "node": "Build Auth",        "type": "main", "index": 0 }]] },
+    "Build Auth":       { "main": [[{ "node": "Fetch All",         "type": "main", "index": 0 }]] },
+    "Fetch All":        { "main": [[{ "node": "Process + Render",  "type": "main", "index": 0 }]] },
+    "Process + Render": { "main": [[{ "node": "Return Dashboard",  "type": "main", "index": 0 }]] }
+  },
+  "pinData": {},
+  "meta": { "instanceId": "YOUR_INSTANCE_ID" }
+}
