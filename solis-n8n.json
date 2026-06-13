@@ -1,0 +1,387 @@
+{
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "56070486-cdc1-437b-b146-afa50ebe6a90",
+      "name": "When clicking 'Execute workflow'"
+    },
+    {
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\n\nconst keyId     = 'YOUR_SOLIS_KEY_ID';\nconst keySecret = 'YOUR_SOLIS_KEY_SECRET';\nconst apiPath   = '/v1/api/inverterList';\n\nconst bodyObj = { pageNo: 1, pageSize: 10 };\nconst body    = JSON.stringify(bodyObj);\n\nconst D = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];\nconst M = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];\nconst t = new Date();\nconst dateStr = `${D[t.getUTCDay()]}, ${String(t.getUTCDate()).padStart(2,'0')} ${M[t.getUTCMonth()]} ${t.getUTCFullYear()} ${String(t.getUTCHours()).padStart(2,'0')}:${String(t.getUTCMinutes()).padStart(2,'0')}:${String(t.getUTCSeconds()).padStart(2,'0')} GMT`;\n\nconst md5     = crypto.createHash('md5').update(body, 'utf8').digest('base64');\nconst signStr = 'POST\\n' + md5 + '\\napplication/json\\n' + dateStr + '\\n' + apiPath;\nconst sign    = crypto.createHmac('sha1', keySecret).update(signStr).digest('base64');\n\nreturn [{\n  json: {\n    authHeader:  'API ' + keyId + ':' + sign,\n    contentMD5:  md5,\n    dateHeader:  dateStr,\n    requestBody: bodyObj\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        208,
+        0
+      ],
+      "id": "b7e9d442-20d5-434c-8317-16f8e8604307",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://www.soliscloud.com:13333/v1/api/inverterList",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ $json.authHeader }}"
+            },
+            {
+              "name": "Content-MD5",
+              "value": "={{ $json.contentMD5 }}"
+            },
+            {
+              "name": "Date",
+              "value": "={{ $json.dateHeader }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.requestBody }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        416,
+        0
+      ],
+      "id": "0c41189a-8052-4cb9-bde9-2ff5c5f898bd",
+      "name": "HTTP Request"
+    },
+    {
+      "parameters": {
+        "jsCode": "const INTERVAL     = 10;\nconst CRITICAL_SOC = 30;\n\nconst records = $input.first().json.data.page.records;\nconst state = $getWorkflowStaticData('global');\nif (!state.bands) state.bands = {};\n\nconst alerts = [];\n\nconst now     = new Date();\nconst utc8    = new Date(now.getTime() + 8 * 60 * 60 * 1000);\nconst hour    = utc8.getUTCHours();\nconst timeStr = utc8.toISOString().replace('T', ' ').slice(0, 19) + ' (UTC+8)';\n\nconst isQuietHours = hour >= 0 && hour < 6;\n\nfor (const inv of records) {\n  const soc           = inv.batteryCapacitySoc;\n  const isDischarging = inv.batteryPower < 0;\n  const currentBand   = Math.floor(soc / INTERVAL) * INTERVAL;\n  const isCritical    = soc <= CRITICAL_SOC;\n\n  if (state.bands[inv.id] === undefined) {\n    state.bands[inv.id] = currentBand;\n    continue;\n  }\n\n  const lastBand = state.bands[inv.id];\n\n  if (isDischarging && currentBand < lastBand) {\n    state.bands[inv.id] = currentBand;\n\n    const loopStart = Math.min(lastBand, 90);\n\n    for (let threshold = loopStart; threshold > currentBand; threshold -= INTERVAL) {\n\n      let route;\n      if (!isQuietHours) {\n        route = 'send';\n      } else if (isCritical) {\n        route = 'critical';\n      } else {\n        route = 'silent';\n      }\n\n      alerts.push({\n        notify:        true,\n        route:         route,\n        station:       inv.stationName,\n        soc:           soc,\n        crossed_below: threshold,\n        power_kw:      Math.abs(inv.batteryPower),\n        is_critical:   isCritical,\n        is_quiet:      isQuietHours,\n        time:          timeStr,\n        message:       `${isCritical ? '🚨' : '🔋'} ${inv.stationName}\\n\\nBattery dropped below <b>${threshold}%</b>\\nNow at <b>${soc}%</b> — discharging at <b>${Math.abs(inv.batteryPower)} kW</b>\\n\\n🕐 ${timeStr}`,\n      });\n    }\n\n  } else if (!isDischarging) {\n    state.bands[inv.id] = currentBand;\n  }\n}\n\nif (alerts.length === 0) {\n  return [{ json: { notify: false, route: 'no_alert', is_quiet: isQuietHours } }];\n}\n\nreturn alerts.map(a => ({ json: a }));\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        624,
+        0
+      ],
+      "id": "05035886-9a77-470e-bc5c-efb234bd5849",
+      "name": "Code in JavaScript1"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        0,
+        192
+      ],
+      "id": "4a22e428-d3a4-4a9a-ae97-663eacdfd513",
+      "name": "Schedule Trigger"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "618fbb86-0f90-45df-b69f-3cd9a401e9ed",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "send",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "8798f813-db9e-4309-80d4-23550bf37f20",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "critical",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "401077d6-98d6-4791-8959-f400bece1e32",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "silent",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "3a63f57e-4686-45ca-aae4-e1a93d1da25c",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "no_alert",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        816,
+        -32
+      ],
+      "id": "abe6e462-b4f8-455d-82ae-43f4cb521553",
+      "name": "Switch"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.pushover.net/1/messages.json",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={\n  \"token\": \"YOUR_PUSHOVER_APP_TOKEN\",\n  \"user\": \"YOUR_PUSHOVER_USER_KEY\",\n  \"title\": \"🔋 Battery Alert\",\n  \"message\": \"<b>{{ $json.station }}</b>\\n\\nBattery dropped below <b>{{ $json.crossed_below }}%</b>\\nCurrent: <b>{{ $json.soc }}%</b>\\nDischarging at: <b>{{ $json.power_kw }} kW</b>\\n\\n🕐 {{ $json.time }}\",\n  \"html\": \"1\",\n  \"sound\": \"pushover\",\n  \"priority\": \"2\",\n  \"ttl\": \"259200\"\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1120,
+        64
+      ],
+      "id": "90571862-6828-4c72-8c95-c13fd24f52de",
+      "name": "Battery Emergency",
+      "retryOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.pushover.net/1/messages.json",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={\n  \"token\": \"YOUR_PUSHOVER_APP_TOKEN\",\n  \"user\": \"YOUR_PUSHOVER_USER_KEY\",\n  \"title\": \"🔋 Battery Alert\",\n  \"message\": \"<b>{{ $json.station }}</b>\\n\\nBattery dropped below <b>{{ $json.crossed_below }}%</b>\\nCurrent: <b>{{ $json.soc }}%</b>\\nDischarging at: <b>{{ $json.power_kw }} kW</b>\\n\\n🕐 {{ $json.time }}\",\n  \"html\": \"1\",\n  \"sound\": \"pushover\",\n  \"priority\": \"1\",\n  \"ttl\": \"259200\"\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1120,
+        -128
+      ],
+      "id": "2c38ce82-ba4b-4d73-a437-9ddcc09d8139",
+      "name": "Battery Alert",
+      "retryOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.pushover.net/1/messages.json",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={\n  \"token\": \"YOUR_PUSHOVER_APP_TOKEN\",\n  \"user\": \"YOUR_PUSHOVER_USER_KEY_2\",\n  \"title\": \"🔋 Battery Alert\",\n  \"message\": \"<b>{{ $json.station }}</b>\\n\\nBattery dropped below <b>{{ $json.crossed_below }}%</b>\\nCurrent: <b>{{ $json.soc }}%</b>\\nDischarging at: <b>{{ $json.power_kw }} kW</b>\\n\\n🕐 {{ $json.time }}\",\n  \"html\": \"1\",\n  \"sound\": \"pushover\",\n  \"priority\": \"1\",\n  \"ttl\": \"259200\"\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1360,
+        -128
+      ],
+      "id": "bdf0a95f-fdea-42aa-92d0-42ef734aecc4",
+      "name": "Battery Alert1",
+      "retryOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.pushover.net/1/messages.json",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={\n  \"token\": \"YOUR_PUSHOVER_APP_TOKEN\",\n  \"user\": \"YOUR_PUSHOVER_USER_KEY_2\",\n  \"title\": \"🔋 Battery Alert\",\n  \"message\": \"<b>{{ $json.station }}</b>\\n\\nBattery dropped below <b>{{ $json.crossed_below }}%</b>\\nCurrent: <b>{{ $json.soc }}%</b>\\nDischarging at: <b>{{ $json.power_kw }} kW</b>\\n\\n🕐 {{ $json.time }}\",\n  \"html\": \"1\",\n  \"sound\": \"pushover\",\n  \"priority\": \"2\",\n  \"ttl\": \"259200\"\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1360,
+        80
+      ],
+      "id": "6625c9a7-7481-4e25-90e5-de3cb997fc53",
+      "name": "Battery Emergency1",
+      "retryOnFail": true
+    }
+  ],
+  "connections": {
+    "When clicking 'Execute workflow'": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript1": {
+      "main": [
+        [
+          {
+            "node": "Switch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch": {
+      "main": [
+        [
+          {
+            "node": "Battery Alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Battery Emergency",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [],
+        []
+      ]
+    },
+    "Battery Emergency": {
+      "main": [
+        [
+          {
+            "node": "Battery Emergency1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Battery Alert": {
+      "main": [
+        [
+          {
+            "node": "Battery Alert1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "YOUR_INSTANCE_ID"
+  }
+}
